@@ -1,0 +1,90 @@
+---
+title: "R Code"
+author: '540741586'
+date: "2025-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load required packages
+# install.packages("tidyverse")
+# install.packages("car")
+# install.packages("lmtest")
+# install.packages("effects")
+library(tidyverse)
+library(car)
+library(lmtest)
+library(effects)
+
+# Load dataset from GitHub
+temp <- tempfile()
+url <- "https://github.com/BORUI99/DATA2002-Project/raw/main/wine%2Bquality.zip"
+download.file(url, temp, mode = "wb")
+unzip(temp, exdir = tempdir())
+wine_red <- read.csv(file.path(tempdir(), "winequality-red.csv"), sep = ";")
+
+summary(wine_red)
+colSums(is.na(wine_red))   # no missing values
+
+# Fit full multiple linear regression (MLR) model
+full.model <- lm(quality ~ ., data = wine_red)
+summary(full.model)
+
+# Linearity & Homoscedasticity
+par(mfrow = c(1, 2))
+plot(full.model$fitted.values, resid(full.model),
+     main = "Residuals vs Fitted", xlab = "Fitted", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+# Breusch–Pagan test to check for heteroscedasticity
+bp <- bptest(full.model)
+bp$p.value   # p-value ≈ 1.6e-09 meaning some heteroscedasticity
+
+# Normality
+qqnorm(rstandard(full.model), main = "Q–Q Plot of Standardized Residuals")
+qqline(rstandard(full.model), col = "red")
+
+# Collinearity
+vif(full.model)   # all < 2 so they are stable coefficients
+
+# Backward AIC variable selection
+step.back.aic <- step(full.model, direction = "backward")
+
+# Compare models
+AIC(full.model, step.back.aic)  # ≈ 3162.28 vs 3156.98
+summary(step.back.aic)$r.squared       # ≈ 0.3595
+summary(step.back.aic)$adj.r.squared   # ≈ 0.3567
+
+# Check significance of dropped terms
+drop1(step.back.aic, test = "F")
+
+# Predicted vs Observed plot
+pred <- predict(step.back.aic)
+plot(pred, wine_red$quality,
+     main = "Predicted vs Observed Quality",
+     xlab = "Predicted", ylab = "Observed")
+abline(0, 1, col = "red", lwd = 2)
+
+
+# Standardized coefficients for relative effect size
+wine_scaled <- as.data.frame(scale(wine_red))
+std.model <- lm(quality ~ ., data = wine_scaled)
+summary(std.model)
+
+# Extract significant variables
+coef(summary(step.back.aic))
+
+# Partial dependence plots for interpretability
+plot(allEffects(step.back.aic))
+
+# Key findings:
+# - Alcohol: β ≈ +0.289 → higher alcohol = higher quality
+# - Volatile acidity: β ≈ −1.013 → higher VA = lower quality
+# - Sulphates, pH: smaller positive/negative effects
+# - R² ≈ 0.36, Adj-R² ≈ 0.357 → good fit with fewer terms
+```
+
