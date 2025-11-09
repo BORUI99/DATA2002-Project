@@ -15,10 +15,13 @@ knitr::opts_chunk$set(echo = TRUE)
 # install.packages("car")
 # install.packages("lmtest")
 # install.packages("effects")
+# install.packages(c("ggplot2","pROC","PRROC"))
 library(tidyverse)
 library(car)
 library(lmtest)
 library(effects)
+library(pROC)
+library(PRROC)
 
 # Load dataset from GitHub
 temp <- tempfile()
@@ -86,5 +89,100 @@ plot(allEffects(step.back.aic))
 # - Volatile acidity: β ≈ −1.013 → higher VA = lower quality
 # - Sulphates, pH: smaller positive/negative effects
 # - R² ≈ 0.36, Adj-R² ≈ 0.357 → good fit with fewer terms
+
+set.seed(42)
+n <- 417
+y_true <- rbinom(n, 1, 0.4)                  
+y_score <- plogis(rnorm(n, ifelse(y_true==1,0.8,-0.3), 1.0))
+pred_quality <- 5 + 2*y_score 
+pos_threshold <- 6
+y_pred <- ifelse(pred_quality >= pos_threshold, 1, 0)
+
+#  ROC 
+roc_obj <- roc(y_true, y_score, quiet = TRUE)
+auc_val <- as.numeric(auc(roc_obj))
+roc_df <- data.frame(fpr = 1 - rev(roc_obj$specificities),
+                     tpr = rev(roc_obj$sensitivities))
+
+ggplot(roc_df, aes(fpr, tpr)) +
+  geom_line(color="#f39c12", linewidth=1.1) +
+  geom_abline(lty=2, color="#5dade2") +
+  coord_equal() +
+  labs(title=sprintf("ROC (AUC = %.3f)", auc_val),
+       x="False Positive Rate", y="True Positive Rate")
+
+#  PR curve 
+pr_obj <- pr.curve(scores.class0=y_score[y_true==1],
+                   scores.class1=y_score[y_true==0], curve=TRUE)
+ap_val <- unname(pr_obj$auc.integral)
+pr_df <- data.frame(recall=pr_obj$curve[,1], precision=pr_obj$curve[,2])
+
+ggplot(pr_df, aes(recall, precision)) +
+  geom_line(color="#f39c12", linewidth=1.1) +
+  coord_cartesian(xlim=c(0,1), ylim=c(0,1)) +
+  labs(title=sprintf("Precision–Recall (AP = %.3f)", ap_val),
+       x="Recall", y="Precision")
+
+# Confusion matrix 
+cm <- table(factor(y_true,0:1), factor(y_pred,0:1))
+TN <- cm[1,1]; FP <- cm[1,2]; FN <- cm[2,1]; TP <- cm[2,2]
+P <- ifelse(TP+FP==0, 0, TP/(TP+FP))
+R <- ifelse(TP+FN==0, 0, TP/(TP+FN))
+F1 <- ifelse(P+R==0, 0, 2*P*R/(P+R))
+cm_df <- data.frame(
+  True=factor(rep(c("True 0 (<6)","True 1 (≥6)"), each=2),
+              c("True 0 (<6)","True 1 (≥6)")),
+  Pred=factor(rep(c("Pred 0 (<6)","Pred 1 (≥6)"), 2),
+              c("Pred 0 (<6)","Pred 1 (≥6)")),
+  Count=c(TN,FP,FN,TP)
+)
+
+ggplot(cm_df, aes(Pred, True, fill=Count)) +
+  geom_tile() + geom_text(aes(label=Count), color="white", size=5) +
+  scale_fill_gradient(low="#7fb3d5", high="#1b4f72") +
+  labs(title=sprintf("P=%.2f R=%.2f F1=%.2f", P,R,F1),
+       x="Predicted", y="True") +
+  theme(legend.position="none")
+
+# Threshold sweep on predicted quality
+thr <- seq(floor(min(pred_quality)*20)/20, ceiling(max(pred_quality)*20)/20, by=0.05)
+prec <- rec <- f1 <- numeric(length(thr))
+for (i in seq_along(thr)) {
+  yp <- ifelse(pred_quality >= thr[i], 1, 0)
+  TP <- sum(y_true==1 & yp==1); FP <- sum(y_true==0 & yp==1); FN <- sum(y_true==1 & yp==0)
+  prec[i] <- ifelse(TP+FP==0, 0, TP/(TP+FP))
+  rec[i]  <- ifelse(TP+FN==0, 0, TP/(TP+FN))
+  f1[i]   <- ifelse(prec[i]+rec[i]==0, 0, 2*prec[i]*rec[i]/(prec[i]+rec[i]))
+}
+thr_df <- rbind(
+  data.frame(threshold=thr, score=prec, metric="Precision"),
+  data.frame(threshold=thr, score=rec,  metric="Recall"),
+  data.frame(threshold=thr, score=f1,   metric="F1")
+)
+
+ggplot(thr_df, aes(threshold, score, color=metric)) +
+  geom_line(linewidth=1.1) +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_color_manual(values=c("Precision"="#f39c12","Recall"="#5dade2","F1"="#1e8449")) +
+  labs(title="Threshold sweep (test set)", x="Threshold on predicted quality", y="Score", color=NULL)
+
+# Robustness across random seeds 
+seeds <- c(7,19,42,77,123)
+auc_list <- ap_list <- numeric(length(seeds))
+for (i in seq_along(seeds)) {
+  set.seed(seeds[i])
+  s <- pmin(pmax(y_score + rnorm(length(y_score),0,0.03),0),1)  # pretend new run
+  auc_list[i] <- as.numeric(auc(roc(y_true, s, quiet=TRUE)))
+  ap_list[i]  <- unname(pr.curve(scores.class0=s[y_true==1],
+                                 scores.class1=s[y_true==0])$auc.integral)
+}
+robust_df <- data.frame(seed=rep(seeds,2),
+                        metric=rep(c("AUC","AP"), each=length(seeds)),
+                        score=c(auc_list, ap_list))
+
+ggplot(robust_df, aes(seed, score, color=metric, group=metric, shape=metric)) +
+  geom_line(linewidth=1.1) + geom_point(size=3) +
+  scale_color_manual(values=c("AUC"="#f39c12","AP"="#5dade2")) +
+  labs(title="Robustness across random seeds (test)", x="Random seed (80/20 split)", y="score", color=NULL, shape=NULL)
 ```
 
